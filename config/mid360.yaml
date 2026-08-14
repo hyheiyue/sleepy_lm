@@ -1,0 +1,27 @@
+sleepy_lio_node:
+  ros__parameters:
+    use_sim_time: false
+    event_reorder_window: 0.07 #最好大于帧率最低的传感器相邻帧时间
+    align_gravity_with_z_axia: true
+    initialization_window: 2.0
+    initialization_min_samples: 200
+    gravity_norm: 9.80665
+    sensor:
+      pointcloud_sensors: ["pc1"]
+      pc1:
+        topic: /livox/lidar
+        type: livox_custom_msg
+        frame_id: livox_frame
+        sensor_in_frame_t: [-0.011, -0.02329, 0.04412]
+        sensor_in_frame_R: [1.0, 0.0, 0.0,
+                            0.0, 1.0, 0.0,
+                            0.0, 0.0, 1.0]
+      imu_sensors: ["imu1"]
+      imu1:
+        topic: /livox/imu
+        frame_id: livox_frame
+        acc_scale: 1.0
+        sensor_in_frame_t: [0.0, 0.0, 0.0]
+        sensor_in_frame_R: [1.0, 0.0, 0.0,
+                            0.0, 1.0, 0.0,
+                            0.0, 0.0, 1.0]
