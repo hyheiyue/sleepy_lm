@@ -77,8 +77,8 @@ extern "C" {
  * and lzf_c.c.
  *
  */
-unsigned int lzf_compress(const void *const in_data, unsigned int in_len,
-                          void *out_data, unsigned int out_len);
+unsigned int
+lzf_compress(const void* const in_data, unsigned int in_len, void* out_data, unsigned int out_len);
 
 /*
  * Decompress data compressed with some version of the lzf_compress
@@ -95,8 +95,12 @@ unsigned int lzf_compress(const void *const in_data, unsigned int in_len,
  *
  * This function is very fast, about as fast as a copying loop.
  */
-unsigned int lzf_decompress(const void *const in_data, unsigned int in_len,
-                            void *out_data, unsigned int out_len);
+unsigned int lzf_decompress(
+    const void* const in_data,
+    unsigned int in_len,
+    void* out_data,
+    unsigned int out_len
+);
 
 #ifdef __cplusplus
 }

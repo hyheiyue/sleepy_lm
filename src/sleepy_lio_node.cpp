@@ -2,13 +2,12 @@
 #include "sleep_lio.hpp"
 #include <memory>
 namespace sleepy {
-class SleepyLioNode : public rclcpp::Node {
+class SleepyLioNode: public rclcpp::Node {
 public:
-  SleepyLioNode(const rclcpp::NodeOptions &options)
-      : Node("sleepy_lio", options) {
-    lio_ = std::make_unique<SleepyLio>(*this);
-  }
-  std::unique_ptr<SleepyLio> lio_;
+    SleepyLioNode(const rclcpp::NodeOptions& options): Node("sleepy_lio", options) {
+        lio_ = std::make_unique<SleepyLio>(*this);
+    }
+    std::unique_ptr<SleepyLio> lio_;
 };
 } // namespace sleepy
 #include "rclcpp_components/register_node_macro.hpp"
