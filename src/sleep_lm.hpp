@@ -2,10 +2,10 @@
 #include <memory>
 #include <rclcpp/node.hpp>
 namespace sleepy {
-class SleepyLio {
+class SleepyLm {
 public:
-    SleepyLio(rclcpp::Node& node);
-    ~SleepyLio();
+    SleepyLm(rclcpp::Node& node);
+    ~SleepyLm();
     struct Impl;
     std::unique_ptr<Impl> _impl;
 };

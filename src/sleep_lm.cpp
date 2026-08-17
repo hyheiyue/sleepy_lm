@@ -1,4 +1,4 @@
-#include "sleep_lio.hpp"
+#include "sleep_lm.hpp"
 #include "odometry/point_lio.hpp"
 #include "sensor/common.hpp"
 #include "sensor/imu.hpp"
@@ -41,7 +41,7 @@ namespace {
 
 } // namespace
 
-struct SleepyLio::Impl {
+struct SleepyLm::Impl {
     struct Params {
         std::string odom_frame = "odom";
         std::string state_frame;
@@ -484,10 +484,9 @@ struct SleepyLio::Impl {
     std::vector<Eigen::Vector3d> points_odom_;
 };
 
-SleepyLio::SleepyLio(rclcpp::Node& node) {
+SleepyLm::SleepyLm(rclcpp::Node& node) {
     _impl = std::make_unique<Impl>(node);
 }
 
-SleepyLio::~SleepyLio() = default;
-
+SleepyLm::~SleepyLm() = default;
 } // namespace sleepy

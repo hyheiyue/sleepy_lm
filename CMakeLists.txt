@@ -76,7 +76,7 @@ if(livox_ros_driver2_FOUND)
     )
 endif()
 rclcpp_components_register_node(${PROJECT_NAME}
-    PLUGIN "sleepy::SleepyLioNode"
+    PLUGIN "sleepy::SleepyLmNode"
     EXECUTABLE ${PROJECT_NAME}_node
 )
 ament_auto_package(

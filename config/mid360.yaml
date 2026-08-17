@@ -1,4 +1,4 @@
-sleepy_lio_node:
+sleepy_lm_node:
   ros__parameters:
     use_sim_time: false
     odom_frame: odom

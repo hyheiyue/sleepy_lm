@@ -8,7 +8,7 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    package_share = get_package_share_directory("sleepy_lio")
+    package_share = get_package_share_directory("sleepy_lm")
 
     return LaunchDescription(
         [
@@ -19,9 +19,9 @@ def generate_launch_description():
                 description="LM parameter file",
             ),
             Node(
-                package="sleepy_lio",
-                executable="sleepy_lio_node",
-                name="sleepy_lio_node",
+                package="sleepy_lm",
+                executable="sleepy_lm_node",
+                name="sleepy_lm_node",
                 output="screen",
                 parameters=[LaunchConfiguration("params_file")],
             ),
