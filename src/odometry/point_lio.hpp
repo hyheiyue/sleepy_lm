@@ -6,6 +6,7 @@
 #include "state.hpp"
 #include "utils/logger.hpp"
 #include "utils/rclcpp_parameter_node.hpp"
+#include "utils/so3.hpp"
 
 #include <Eigen/Cholesky>
 #include <Eigen/Core>
@@ -214,31 +215,6 @@ public:
     }
 
 private:
-    static Eigen::Matrix3d hat(const Eigen::Vector3d& v) {
-        Eigen::Matrix3d out;
-        out << 0.0, -v.z(), v.y(), v.z(), 0.0, -v.x(), -v.y(), v.x(), 0.0;
-        return out;
-    }
-
-    static Eigen::Matrix3d exp_so3(const Eigen::Vector3d& angle) {
-        const double norm = angle.norm();
-        if (norm < 1e-12) {
-            return Eigen::Matrix3d::Identity() + hat(angle);
-        }
-        return Eigen::AngleAxisd(norm, angle / norm).toRotationMatrix();
-    }
-
-    static Eigen::Matrix3d a_matrix(const Eigen::Vector3d& angle) {
-        const double squared_norm = angle.squaredNorm();
-        if (squared_norm < 1e-22) {
-            return Eigen::Matrix3d::Identity();
-        }
-        const double norm = std::sqrt(squared_norm);
-        const Eigen::Matrix3d angle_hat = hat(angle);
-        return Eigen::Matrix3d::Identity() + (1.0 - std::cos(norm)) / squared_norm * angle_hat
-            + (1.0 - std::sin(norm) / norm) / squared_norm * angle_hat * angle_hat;
-    }
-
     static int bg_index(std::size_t imu_id) {
         return BASE_STATE_DIM + static_cast<int>(IMU_ERROR_DIM * imu_id);
     }
@@ -430,9 +406,10 @@ private:
         const int active_dim = active_error_state_dim();
         const Eigen::Matrix3d R_odom_state = state_.pose.linear();
         const Eigen::Vector3d rotation_increment = state_.omg * dt;
-        const Eigen::Matrix3d rotation_transition = exp_so3(-rotation_increment);
-        const Eigen::Matrix3d omega_transition = a_matrix(-rotation_increment) * dt;
-        const Eigen::Matrix3d velocity_rotation_transition = -R_odom_state * hat(state_.acc) * dt;
+        const Eigen::Matrix3d rotation_transition = utils::so3::exp_so3(-rotation_increment);
+        const Eigen::Matrix3d omega_transition = utils::so3::a_matrix(-rotation_increment) * dt;
+        const Eigen::Matrix3d velocity_rotation_transition =
+            -R_odom_state * utils::so3::hat(state_.acc) * dt;
         const Eigen::Matrix3d velocity_acceleration_transition = R_odom_state * dt;
 
         // F differs from identity only in the position, rotation and velocity
@@ -477,7 +454,7 @@ private:
 
         state_.pose.translation() += state_.vel * dt;
         state_.vel += (R_odom_state * state_.acc + state_.gravity) * dt;
-        state_.pose.linear() = R_odom_state * exp_so3(rotation_increment);
+        state_.pose.linear() = R_odom_state * utils::so3::exp_so3(rotation_increment);
         state_.timestamp = timestamp;
     }
 
@@ -643,7 +620,7 @@ private:
 
     void apply_error_state(const ErrorState& correction) {
         state_.pose.translation() += correction.segment<3>(POSITION_INDEX);
-        state_.pose.linear() *= exp_so3(correction.segment<3>(ROTATION_INDEX));
+        state_.pose.linear() *= utils::so3::exp_so3(correction.segment<3>(ROTATION_INDEX));
         state_.pose.linear() =
             Eigen::Quaterniond(state_.pose.linear()).normalized().toRotationMatrix();
         state_.vel += correction.segment<3>(VELOCITY_INDEX);
