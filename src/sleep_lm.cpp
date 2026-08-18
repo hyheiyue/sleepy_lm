@@ -27,6 +27,7 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include <visualization_msgs/msg/marker.hpp>
 namespace sleepy {
 
 namespace {
@@ -63,11 +64,12 @@ struct SleepyLm::Impl {
         tf_ = std::make_shared<utils::RclTF>(node);
         auto root_config = utils::ParamsNode(node);
         params_.load(root_config);
-        point_lio_ = std::make_unique<PointLio>(root_config);
+        point_lio_ = std::make_unique<PointLio>(root_config.sub("point_lio"));
         odom_pub_ = node.create_publisher<nav_msgs::msg::Odometry>("odometry", 10);
         odom_path_pub_ = node.create_publisher<nav_msgs::msg::Path>("odometry_path", 10);
         pointcloud_pub_ =
             node.create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 10);
+
         auto sensor_config = root_config.sub("sensor");
 
         const auto pointcloud_names =
@@ -319,10 +321,8 @@ struct SleepyLm::Impl {
             switch (sensor.type) {
                 case SensorType::Lidar: {
                     auto& point = preprocess_.point_deques[sensor.id].front();
-                    auto pt_odom_opt = point_lio_->add_point(point, point_cloud_sensors_);
-                    if (pt_odom_opt) {
-                        points_odom_.push_back(*pt_odom_opt);
-                    }
+                    point_lio_->add_point(point, point_cloud_sensors_);
+
                     preprocess_.point_deques[sensor.id].pop_front();
                     log_.processed_pts++;
                     processed_sample = true;
@@ -345,8 +345,8 @@ struct SleepyLm::Impl {
 
         if (processed_sample && point_lio_->state_initialized()) {
             publish_odometry();
-            publish_pointcloud();
-            points_odom_.clear();
+            publish_pointcloud(point_lio_->points_odom_cache_);
+            point_lio_->points_odom_cache_.clear();
         }
 
         utils::dt_once(
@@ -407,8 +407,8 @@ struct SleepyLm::Impl {
         odom_path_pub_->publish(odom_path_);
         tf_->publish_transform(state.pose, params_.odom_frame, params_.state_frame, stamp);
     }
-    void publish_pointcloud() {
-        if (points_odom_.empty()) {
+    void publish_pointcloud(const std::vector<Eigen::Vector3d>& points) {
+        if (points.empty()) {
             return;
         }
         const auto& state = point_lio_->state();
@@ -431,31 +431,28 @@ struct SleepyLm::Impl {
             "x",
             1,
             sensor_msgs::msg::PointField::FLOAT32,
-
             "y",
             1,
             sensor_msgs::msg::PointField::FLOAT32,
-
             "z",
             1,
             sensor_msgs::msg::PointField::FLOAT32,
-
             "intensity",
             1,
             sensor_msgs::msg::PointField::FLOAT32
         );
 
-        modifier.resize(points_odom_.size());
+        modifier.resize(points.size());
 
         sensor_msgs::PointCloud2Iterator<float> iter_x(msg, "x");
         sensor_msgs::PointCloud2Iterator<float> iter_y(msg, "y");
         sensor_msgs::PointCloud2Iterator<float> iter_z(msg, "z");
         sensor_msgs::PointCloud2Iterator<float> iter_i(msg, "intensity");
-        for (const auto& point: points_odom_) {
+        for (const auto& point: points) {
             *iter_x = static_cast<float>(point.x());
             *iter_y = static_cast<float>(point.y());
             *iter_z = static_cast<float>(point.z());
-            *iter_i = (point-state.pose.translation()).norm();
+            *iter_i = (point - state.pose.translation()).norm();
             ++iter_x;
             ++iter_y;
             ++iter_z;
@@ -464,6 +461,7 @@ struct SleepyLm::Impl {
 
         pointcloud_pub_->publish(msg);
     }
+
     struct Preprocess {
         std::vector<std::deque<common::Point>> point_deques;
         std::vector<double> last_timestamp_lidars;
@@ -481,7 +479,6 @@ struct SleepyLm::Impl {
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr odom_path_pub_;
     nav_msgs::msg::Path odom_path_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_pub_;
-    std::vector<Eigen::Vector3d> points_odom_;
 };
 
 SleepyLm::SleepyLm(rclcpp::Node& node) {

@@ -19,4 +19,28 @@ struct EstimationState {
 
     Eigen::Vector3d gravity = Eigen::Vector3d::Zero();
 };
+struct ImuState {
+    struct InitializationSample {
+        double timestamp = 0.0;
+        Eigen::Vector3d linear_acceleration = Eigen::Vector3d::Zero();
+        Eigen::Vector3d angular_velocity = Eigen::Vector3d::Zero();
+    };
+
+    // T_state_imu maps IMU-frame coordinates into the state frame.
+    Eigen::Isometry3d imu_in_state = Eigen::Isometry3d::Identity();
+
+    // Biases remain in this IMU's own measurement frame.
+    Eigen::Vector3d ba = Eigen::Vector3d::Zero();
+    Eigen::Vector3d bg = Eigen::Vector3d::Zero();
+
+    Eigen::Vector3d mean_specific_force_at_state_origin = Eigen::Vector3d::Zero();
+    Eigen::Vector3d last_omega_state = Eigen::Vector3d::Zero();
+    std::vector<InitializationSample> initialization_samples;
+    double first_timestamp = 0.0;
+    double last_timestamp = 0.0;
+    double last_motion_timestamp = 0.0;
+    bool has_first_sample = false;
+    bool has_last_motion = false;
+    bool initialized = false;
+};
 } // namespace sleepy

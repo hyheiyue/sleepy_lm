@@ -13,10 +13,10 @@
 #include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
 
-#include <Eigen/src/Core/Matrix.h>
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <deque>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -90,31 +90,6 @@ private:
 
     enum class InitStage { WaitingImu, BuildingMap, Finished };
 
-    struct ImuState {
-        struct InitializationSample {
-            double timestamp = 0.0;
-            Eigen::Vector3d linear_acceleration = Eigen::Vector3d::Zero();
-            Eigen::Vector3d angular_velocity = Eigen::Vector3d::Zero();
-        };
-
-        // T_state_imu maps IMU-frame coordinates into the state frame.
-        Eigen::Isometry3d imu_in_state = Eigen::Isometry3d::Identity();
-
-        // Biases remain in this IMU's own measurement frame.
-        Eigen::Vector3d ba = Eigen::Vector3d::Zero();
-        Eigen::Vector3d bg = Eigen::Vector3d::Zero();
-
-        Eigen::Vector3d mean_specific_force_at_state_origin = Eigen::Vector3d::Zero();
-        Eigen::Vector3d last_omega_state = Eigen::Vector3d::Zero();
-        std::vector<InitializationSample> initialization_samples;
-        double first_timestamp = 0.0;
-        double last_timestamp = 0.0;
-        double last_motion_timestamp = 0.0;
-        bool has_first_sample = false;
-        bool has_last_motion = false;
-        bool initialized = false;
-    };
-
 public:
     explicit PointLio(const utils::ParamsNode& config) {
         params_.load(config);
@@ -130,10 +105,6 @@ public:
 
     [[nodiscard]] bool state_initialized() const noexcept {
         return init_stage_ != InitStage::WaitingImu;
-    }
-
-    [[nodiscard]] bool map_initialized() const noexcept {
-        return init_stage_ == InitStage::Finished;
     }
 
     void add_imu(const common::ImuMsg& imu, const std::vector<ImuSensor>& sensors) {
@@ -169,17 +140,17 @@ public:
         update_imu(imu, imu_state, imu.sensor.id);
     }
 
-    std::optional<Eigen::Vector3d>
+    void
     add_point(const common::Point& point_in_lidar, const std::vector<PointCloudSensor>& sensors) {
         if (point_in_lidar.sensor.id >= sensors.size() || !std::isfinite(point_in_lidar.timestamp)
             || !point_in_lidar.position.allFinite())
         {
-            return std::nullopt;
+            return;
         }
 
         const auto& sensor = sensors[point_in_lidar.sensor.id];
         if (!sensor.frame_in_state) {
-            return std::nullopt;
+            return;
         }
 
         const Eigen::Isometry3d lidar_in_state =
@@ -190,31 +161,30 @@ public:
             // Keep the startup scan in the fixed state frame. It is transformed
             // into odometry only after gravity has established the initial pose.
             pending_initial_points_.push_back(point_state.cast<float>());
-            return std::nullopt;
+            return;
         }
 
         if (point_in_lidar.timestamp < state_.timestamp) {
-            return std::nullopt;
+            return;
         }
         predict_to(point_in_lidar.timestamp);
 
         if (init_stage_ == InitStage::BuildingMap) {
             initial_points_.push_back(transform_point_to_odom(point_state).cast<float>());
             initialize_map();
-            return std::nullopt;
+            return;
         }
 
         if (init_stage_ != InitStage::Finished) {
-            return std::nullopt;
+            return;
         }
 
         update_point(point_in_lidar.position, point_state);
         auto point_odom = transform_point_to_odom(point_state);
         ivox_->add_point(point_odom.cast<float>());
-        return std::make_optional(point_odom);
+        points_odom_cache_.push_back(point_odom);
     }
 
-private:
     static int bg_index(std::size_t imu_id) {
         return BASE_STATE_DIM + static_cast<int>(IMU_ERROR_DIM * imu_id);
     }
@@ -571,10 +541,12 @@ private:
 
         const Eigen::Vector3f normal = solver.eigenvectors().col(0).normalized();
         const float d = -normal.dot(centroid);
+        float half_extent = 0.1F;
         for (const auto& point: nearest_points_) {
             if (std::abs(normal.dot(point) + d) > params_.plane_threshold) {
                 return false;
             }
+            half_extent = std::max(half_extent, (point - centroid).norm());
         }
 
         const double point_distance = static_cast<double>(normal.dot(point_odom) + d);
@@ -638,7 +610,6 @@ private:
         return state_.pose * point_state;
     }
 
-private:
     Params params_;
     InitStage init_stage_ = InitStage::WaitingImu;
     std::vector<ImuState> imu_states_;
@@ -649,6 +620,7 @@ private:
     std::vector<Eigen::Vector3f> initial_points_;
     std::vector<Eigen::Vector3f> pending_initial_points_;
     std::vector<Eigen::Vector3f> nearest_points_;
+    std::vector<Eigen::Vector3d> points_odom_cache_;
 };
 
 } // namespace sleepy

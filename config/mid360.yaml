@@ -2,30 +2,11 @@ sleepy_lm_node:
   ros__parameters:
     use_sim_time: false
     odom_frame: odom
-    align_gravity_with_z_axis: true
-    initialization_window: 1.0
-    initialization_min_samples: 200
-    gravity_norm: 9.80665
-    initial_map_size: 1000
-    map_resolution: 0.2
-    map_capacity: 1000000
-    laser_point_cov: 0.01
-    imu_meas_acc_cov: 0.01
-    imu_meas_omg_cov: 0.01
-    velocity_cov: 20.0
-    acceleration_cov: 500.0
-    omg_cov: 1000.0
-    ba_cov: 0.0001
-    bg_cov: 0.0001
-    plane_threshold: 0.1
-    match_sqaured: 81.0
-    check_satu: false
-    satu_acc: 1000.0
-    satu_gyro: 1000.0
+    
     state_frame: livox_frame
     min_distance: 0.5
     max_distance: 20.0
-    point_filter_num: 3
+    point_filter_num: 5
     sensor:
       pointcloud_sensors: ["pc1"]
       pc1:
@@ -45,5 +26,26 @@ sleepy_lm_node:
         sensor_in_frame_R: [1.0, 0.0, 0.0,
                             0.0, 1.0, 0.0,
                             0.0, 0.0, 1.0]
+    point_lio:
+      align_gravity_with_z_axis: true
+      initialization_window: 1.0
+      initialization_min_samples: 200
+      gravity_norm: 9.80665
+      initial_map_size: 1000
+      map_resolution: 0.5
+      map_capacity: 1000000
+      laser_point_cov: 0.01
+      imu_meas_acc_cov: 0.01
+      imu_meas_omg_cov: 0.01
+      velocity_cov: 20.0
+      acceleration_cov: 500.0
+      omg_cov: 1000.0
+      ba_cov: 0.0001
+      bg_cov: 0.0001
+      plane_threshold: 0.1
+      match_sqaured: 81.0
+      check_satu: false
+      satu_acc: 1000.0
+      satu_gyro: 1000.0
 
     

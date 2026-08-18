@@ -7,12 +7,14 @@
 #include "utils/rclcpp_parameter_node.hpp"
 #include "utils/utils.hpp"
 #include <Eigen/Dense>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
 namespace sleepy {
 
 struct PointCloudSensor {
+    using Ptr = std::shared_ptr<PointCloudSensor>;
     std::string name;
     std::string frame_id;
     std::string type;
