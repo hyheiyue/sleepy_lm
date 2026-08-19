@@ -115,6 +115,37 @@ public:
             return;
         }
 
+        const auto ensure_imu_count = [this](std::size_t count) {
+            if (count > MAX_IMUS || imu_states_.size() >= count) {
+                return;
+            }
+
+            const std::size_t old_count = imu_states_.size();
+            imu_states_.resize(count);
+            if (old_count == 0) {
+                P_.setZero();
+                P_.topLeftCorner(BASE_STATE_DIM, BASE_STATE_DIM).diagonal().setConstant(0.01);
+                P_.block<3, 3>(GRAVITY_INDEX, GRAVITY_INDEX).diagonal().setConstant(0.0001);
+            }
+            for (std::size_t i = old_count; i < imu_states_.size(); ++i) {
+                P_.block<3, 3>(imu_error_index(i), imu_error_index(i))
+                    .diagonal()
+                    .setConstant(0.001);
+                P_.block<3, 3>(imu_error_index(i, 3), imu_error_index(i, 3))
+                    .diagonal()
+                    .setConstant(0.001);
+            }
+            process_noise_diagonal_.setZero();
+            process_noise_diagonal_.segment<3>(VELOCITY_INDEX).setConstant(params_.velocity_cov);
+            process_noise_diagonal_.segment<3>(OMEGA_INDEX).setConstant(params_.omg_cov);
+            process_noise_diagonal_.segment<3>(ACCELERATION_INDEX)
+                .setConstant(params_.acceleration_cov);
+            for (std::size_t i = 0; i < imu_states_.size(); ++i) {
+                process_noise_diagonal_.segment<3>(imu_error_index(i)).setConstant(params_.bg_cov);
+                process_noise_diagonal_.segment<3>(imu_error_index(i, 3))
+                    .setConstant(params_.ba_cov);
+            }
+        };
         ensure_imu_count(sensors.size());
         const auto& sensor = sensors[imu.sensor.id];
         if (!sensor.frame_in_state) {
@@ -125,8 +156,31 @@ public:
         imu_state.imu_in_state = sensor.frame_in_state.value() * sensor.sensor_in_frame;
 
         if (!imu_state.initialized) {
-            collect_initialization_sample(imu_state, imu);
-            if (all_imu_initialized()) {
+            if (!imu_state.has_first_sample) {
+                imu_state.first_timestamp = imu.timestamp;
+                imu_state.has_first_sample = true;
+            } else if (imu.timestamp < imu_state.last_timestamp) {
+                return;
+            }
+
+            imu_state.initialization_samples.push_back(ImuState::InitializationSample {
+                .timestamp = imu.timestamp,
+                .linear_acceleration = imu.linear_acceleration,
+                .angular_velocity = imu.angular_velocity,
+            });
+            imu_state.last_timestamp = imu.timestamp;
+
+            const bool enough_samples = imu_state.initialization_samples.size()
+                >= static_cast<std::size_t>(params_.initialization_min_samples);
+            const bool enough_time =
+                imu.timestamp - imu_state.first_timestamp >= params_.initialization_window;
+            if (enough_samples && enough_time) {
+                initialize_imu(imu_state);
+            }
+            if (std::all_of(imu_states_.begin(), imu_states_.end(), [](const ImuState& state) {
+                    return state.initialized;
+                }))
+            {
                 initialize_state(imu.timestamp);
             }
             return;
@@ -170,8 +224,15 @@ public:
         predict_to(point_in_lidar.timestamp);
 
         if (init_stage_ == InitStage::BuildingMap) {
-            initial_points_.push_back(transform_point_to_odom(point_state).cast<float>());
-            initialize_map();
+            initial_points_.push_back((state_.pose * point_state).cast<float>());
+            if (initial_points_.size() >= static_cast<std::size_t>(params_.initial_map_size)) {
+                for (const auto& point: initial_points_) {
+                    ivox_->add_point(point);
+                }
+                initial_points_.clear();
+                init_stage_ = InitStage::Finished;
+                utils::log_info("Point-LIO map initialized");
+            }
             return;
         }
 
@@ -180,77 +241,17 @@ public:
         }
 
         update_point(point_in_lidar.position, point_state);
-        auto point_odom = transform_point_to_odom(point_state);
+        const auto point_odom = state_.pose * point_state;
         ivox_->add_point(point_odom.cast<float>());
         points_odom_cache_.push_back(point_odom);
     }
 
-    static int bg_index(std::size_t imu_id) {
-        return BASE_STATE_DIM + static_cast<int>(IMU_ERROR_DIM * imu_id);
-    }
-
-    static int ba_index(std::size_t imu_id) {
-        return bg_index(imu_id) + 3;
+    static int imu_error_index(std::size_t imu_id, int offset = 0) {
+        return BASE_STATE_DIM + static_cast<int>(IMU_ERROR_DIM * imu_id) + offset;
     }
 
     [[nodiscard]] int active_error_state_dim() const {
         return BASE_STATE_DIM + static_cast<int>(IMU_ERROR_DIM * imu_states_.size());
-    }
-
-    void ensure_imu_count(std::size_t count) {
-        if (count > MAX_IMUS || imu_states_.size() >= count) {
-            return;
-        }
-
-        const std::size_t old_count = imu_states_.size();
-        imu_states_.resize(count);
-
-        if (old_count == 0) {
-            P_.setZero();
-            P_.topLeftCorner(BASE_STATE_DIM, BASE_STATE_DIM).diagonal().setConstant(0.01);
-            P_.block<3, 3>(GRAVITY_INDEX, GRAVITY_INDEX).diagonal().setConstant(0.0001);
-        }
-        for (std::size_t i = old_count; i < imu_states_.size(); ++i) {
-            P_.block<3, 3>(bg_index(i), bg_index(i)).diagonal().setConstant(0.001);
-            P_.block<3, 3>(ba_index(i), ba_index(i)).diagonal().setConstant(0.001);
-        }
-        rebuild_process_noise();
-    }
-
-    void rebuild_process_noise() {
-        process_noise_diagonal_.setZero();
-        process_noise_diagonal_.segment<3>(VELOCITY_INDEX).setConstant(params_.velocity_cov);
-        process_noise_diagonal_.segment<3>(OMEGA_INDEX).setConstant(params_.omg_cov);
-        process_noise_diagonal_.segment<3>(ACCELERATION_INDEX)
-            .setConstant(params_.acceleration_cov);
-        for (std::size_t i = 0; i < imu_states_.size(); ++i) {
-            process_noise_diagonal_.segment<3>(bg_index(i)).setConstant(params_.bg_cov);
-            process_noise_diagonal_.segment<3>(ba_index(i)).setConstant(params_.ba_cov);
-        }
-    }
-
-    void collect_initialization_sample(ImuState& imu_state, const common::ImuMsg& imu) {
-        if (!imu_state.has_first_sample) {
-            imu_state.first_timestamp = imu.timestamp;
-            imu_state.has_first_sample = true;
-        } else if (imu.timestamp < imu_state.last_timestamp) {
-            return;
-        }
-
-        imu_state.initialization_samples.push_back(ImuState::InitializationSample {
-            .timestamp = imu.timestamp,
-            .linear_acceleration = imu.linear_acceleration,
-            .angular_velocity = imu.angular_velocity,
-        });
-        imu_state.last_timestamp = imu.timestamp;
-
-        const bool enough_samples = imu_state.initialization_samples.size()
-            >= static_cast<std::size_t>(params_.initialization_min_samples);
-        const bool enough_time =
-            imu.timestamp - imu_state.first_timestamp >= params_.initialization_window;
-        if (enough_samples && enough_time) {
-            initialize_imu(imu_state);
-        }
     }
 
     void initialize_imu(ImuState& imu_state) {
@@ -334,7 +335,7 @@ public:
         state_.acc = -state_.pose.linear().transpose() * state_.gravity;
 
         for (const auto& point: pending_initial_points_) {
-            initial_points_.push_back(transform_point_to_odom(point.cast<double>()).cast<float>());
+            initial_points_.push_back((state_.pose * point.cast<double>()).cast<float>());
         }
         pending_initial_points_.clear();
 
@@ -345,26 +346,6 @@ public:
         init_stage_ = InitStage::BuildingMap;
 
         return true;
-    }
-
-    bool initialize_map() {
-        if (initial_points_.size() < static_cast<std::size_t>(params_.initial_map_size)) {
-            return false;
-        }
-        for (const auto& point: initial_points_) {
-            ivox_->add_point(point);
-        }
-        initial_points_.clear();
-        init_stage_ = InitStage::Finished;
-        utils::log_info("Point-LIO map initialized");
-        return true;
-    }
-
-    [[nodiscard]] bool all_imu_initialized() const {
-        return !imu_states_.empty()
-            && std::all_of(imu_states_.begin(), imu_states_.end(), [](const ImuState& imu) {
-                   return imu.initialized;
-               });
     }
 
     void predict_to(double timestamp) {
@@ -481,15 +462,19 @@ public:
         selected_columns.block(0, 0, active_dim, 3) = P_.block(0, OMEGA_INDEX, active_dim, 3);
         selected_columns.block(0, 3, active_dim, 3) =
             P_.block(0, ACCELERATION_INDEX, active_dim, 3);
-        selected_columns.block(0, 6, active_dim, 3) = P_.block(0, bg_index(imu_id), active_dim, 3);
-        selected_columns.block(0, 9, active_dim, 3) = P_.block(0, ba_index(imu_id), active_dim, 3);
+        selected_columns.block(0, 6, active_dim, 3) =
+            P_.block(0, imu_error_index(imu_id), active_dim, 3);
+        selected_columns.block(0, 9, active_dim, 3) =
+            P_.block(0, imu_error_index(imu_id, 3), active_dim, 3);
 
         Eigen::Matrix<double, 12, 12> selected_covariance;
         selected_covariance.block<3, 12>(0, 0) = selected_columns.block<3, 12>(OMEGA_INDEX, 0);
         selected_covariance.block<3, 12>(3, 0) =
             selected_columns.block<3, 12>(ACCELERATION_INDEX, 0);
-        selected_covariance.block<3, 12>(6, 0) = selected_columns.block(bg_index(imu_id), 0, 3, 12);
-        selected_covariance.block<3, 12>(9, 0) = selected_columns.block(ba_index(imu_id), 0, 3, 12);
+        selected_covariance.block<3, 12>(6, 0) =
+            selected_columns.block(imu_error_index(imu_id), 0, 3, 12);
+        selected_covariance.block<3, 12>(9, 0) =
+            selected_columns.block(imu_error_index(imu_id, 3), 0, 3, 12);
 
         Eigen::Matrix<double, MAX_ERROR_STATE_DIM, 6> PHT;
         PHT.topRows(active_dim).noalias() = selected_columns.topRows(active_dim) * H.transpose();
@@ -515,7 +500,7 @@ public:
     }
 
     bool update_point(const Eigen::Vector3f& point_lidar, const Eigen::Vector3d& point_state) {
-        const Eigen::Vector3f point_odom = transform_point_to_odom(point_state).cast<float>();
+        const Eigen::Vector3f point_odom = (state_.pose * point_state).cast<float>();
         nearest_points_.clear();
         ivox_->get_closest_point(point_odom, nearest_points_, NUM_MATCH_POINTS);
         if (nearest_points_.size() != NUM_MATCH_POINTS) {
@@ -541,12 +526,11 @@ public:
 
         const Eigen::Vector3f normal = solver.eigenvectors().col(0).normalized();
         const float d = -normal.dot(centroid);
-        float half_extent = 0.1F;
+
         for (const auto& point: nearest_points_) {
             if (std::abs(normal.dot(point) + d) > params_.plane_threshold) {
                 return false;
             }
-            half_extent = std::max(half_extent, (point - centroid).norm());
         }
 
         const double point_distance = static_cast<double>(normal.dot(point_odom) + d);
@@ -564,10 +548,6 @@ public:
         PHT.head(active_dim).noalias() = P_.block(0, 0, active_dim, 6) * H.transpose();
         const double innovation_covariance =
             (H * P_.topLeftCorner<6, 6>() * H.transpose())(0, 0) + params_.laser_point_cov;
-        if (!std::isfinite(innovation_covariance) || innovation_covariance <= 0.0) {
-            return false;
-        }
-
         ErrorState correction = ErrorState::Zero();
         correction.head(active_dim) =
             PHT.head(active_dim) * (-point_distance / innovation_covariance);
@@ -600,14 +580,9 @@ public:
         state_.acc += correction.segment<3>(ACCELERATION_INDEX);
         state_.gravity += correction.segment<3>(GRAVITY_INDEX);
         for (std::size_t i = 0; i < imu_states_.size(); ++i) {
-            imu_states_[i].bg += correction.segment<3>(bg_index(i));
-            imu_states_[i].ba += correction.segment<3>(ba_index(i));
+            imu_states_[i].bg += correction.segment<3>(imu_error_index(i));
+            imu_states_[i].ba += correction.segment<3>(imu_error_index(i, 3));
         }
-    }
-
-    [[nodiscard]] Eigen::Vector3d transform_point_to_odom(const Eigen::Vector3d& point_state
-    ) const {
-        return state_.pose * point_state;
     }
 
     Params params_;

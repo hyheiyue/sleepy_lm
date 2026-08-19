@@ -75,6 +75,14 @@ if(livox_ros_driver2_FOUND)
         livox_ros_driver2
     )
 endif()
+
+if(BUILD_TESTING)
+    add_executable(cubic_pose_spline_test test/cubic_pose_spline_test.cpp)
+    target_include_directories(cubic_pose_spline_test PRIVATE src)
+    target_link_libraries(cubic_pose_spline_test Eigen3::Eigen)
+    add_test(NAME cubic_pose_spline_test COMMAND cubic_pose_spline_test)
+endif()
+
 rclcpp_components_register_node(${PROJECT_NAME}
     PLUGIN "sleepy::SleepyLmNode"
     EXECUTABLE ${PROJECT_NAME}_node
