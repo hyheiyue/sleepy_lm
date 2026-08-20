@@ -3,6 +3,7 @@
 #include "lidar_adapter/livox_custom_msg.hpp"
 #include "lidar_adapter/rslidar.hpp"
 #include "sensor/common.hpp"
+#include "sensor/lidar_adapter/livox_pointcloud2.hpp"
 #include "utils/logger.hpp"
 #include "utils/rclcpp_parameter_node.hpp"
 #include "utils/utils.hpp"
@@ -34,6 +35,9 @@ struct PointCloudSensor {
             utils::log_error("livox_custom_msg requested but not available!");
             return nullptr;
 #endif
+        }
+        if (normalized_type == "LIVOX_POINTCLOUD2") {
+            return std::make_unique<LivoxPointCloud2Adapter>();
         }
         utils::log_error("unknown lidar type: {}", type);
         return nullptr;

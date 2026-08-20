@@ -189,8 +189,8 @@ public:
         if (!state_initialized() || imu.timestamp < state_.timestamp) {
             return;
         }
-
-        predict_to(imu.timestamp);
+        predict_state(imu.timestamp);
+        predict_cov(imu.timestamp);
         update_imu(imu, imu_state, imu.sensor.id);
     }
 
@@ -221,7 +221,7 @@ public:
         if (point_in_lidar.timestamp < state_.timestamp) {
             return;
         }
-        predict_to(point_in_lidar.timestamp);
+        predict_state(point_in_lidar.timestamp);
 
         if (init_stage_ == InitStage::BuildingMap) {
             initial_points_.push_back((state_.pose * point_state).cast<float>());
@@ -317,6 +317,7 @@ public:
         gravity_state *= params_.gravity_norm;
 
         state_.timestamp = timestamp;
+        cov_timestamp_ = timestamp;
         state_.pose.setIdentity();
         state_.vel.setZero();
         state_.omg.setZero();
@@ -348,27 +349,40 @@ public:
         return true;
     }
 
-    void predict_to(double timestamp) {
+    void predict_state(double timestamp) {
         const double dt = timestamp - state_.timestamp;
         if (dt <= 0.0) {
             return;
         }
 
-        const int active_dim = active_error_state_dim();
         const Eigen::Matrix3d R_odom_state = state_.pose.linear();
         const Eigen::Vector3d rotation_increment = state_.omg * dt;
+
+        state_.pose.translation() += state_.vel * dt;
+        state_.vel += (R_odom_state * state_.acc + state_.gravity) * dt;
+        state_.pose.linear() = R_odom_state * utils::so3::exp_so3(rotation_increment);
+        state_.timestamp = timestamp;
+    }
+    void predict_cov(double timestamp) {
+        const double dt_cov = timestamp - cov_timestamp_;
+        if (dt_cov <= 0.0) {
+            return;
+        }
+        const int active_dim = active_error_state_dim();
+        const Eigen::Matrix3d R_odom_state = state_.pose.linear();
+        const Eigen::Vector3d rotation_increment = state_.omg * dt_cov;
         const Eigen::Matrix3d rotation_transition = utils::so3::exp_so3(-rotation_increment);
-        const Eigen::Matrix3d omega_transition = utils::so3::a_matrix(-rotation_increment) * dt;
+        const Eigen::Matrix3d omega_transition = utils::so3::a_matrix(-rotation_increment) * dt_cov;
         const Eigen::Matrix3d velocity_rotation_transition =
-            -R_odom_state * utils::so3::hat(state_.acc) * dt;
-        const Eigen::Matrix3d velocity_acceleration_transition = R_odom_state * dt;
+            -R_odom_state * utils::so3::hat(state_.acc) * dt_cov;
+        const Eigen::Matrix3d velocity_acceleration_transition = R_odom_state * dt_cov;
 
         // F differs from identity only in the position, rotation and velocity
         // block rows. Form FP and then the corresponding columns of FPF^T.
         Covariance FP;
         FP.topLeftCorner(active_dim, active_dim) = P_.topLeftCorner(active_dim, active_dim);
         FP.block(POSITION_INDEX, 0, 3, active_dim) = P_.block(POSITION_INDEX, 0, 3, active_dim)
-            + dt * P_.block(VELOCITY_INDEX, 0, 3, active_dim);
+            + dt_cov * P_.block(VELOCITY_INDEX, 0, 3, active_dim);
         FP.block(ROTATION_INDEX, 0, 3, active_dim).noalias() =
             rotation_transition * P_.block(ROTATION_INDEX, 0, 3, active_dim)
             + omega_transition * P_.block(OMEGA_INDEX, 0, 3, active_dim);
@@ -376,13 +390,13 @@ public:
             P_.block(VELOCITY_INDEX, 0, 3, active_dim)
             + velocity_rotation_transition * P_.block(ROTATION_INDEX, 0, 3, active_dim)
             + velocity_acceleration_transition * P_.block(ACCELERATION_INDEX, 0, 3, active_dim)
-            + dt * P_.block(GRAVITY_INDEX, 0, 3, active_dim);
+            + dt_cov * P_.block(GRAVITY_INDEX, 0, 3, active_dim);
 
         Eigen::Matrix<double, MAX_ERROR_STATE_DIM, 3> position_columns;
         Eigen::Matrix<double, MAX_ERROR_STATE_DIM, 3> rotation_columns;
         Eigen::Matrix<double, MAX_ERROR_STATE_DIM, 3> velocity_columns;
         position_columns.topRows(active_dim) = FP.block(0, POSITION_INDEX, active_dim, 3)
-            + dt * FP.block(0, VELOCITY_INDEX, active_dim, 3);
+            + dt_cov * FP.block(0, VELOCITY_INDEX, active_dim, 3);
         rotation_columns.topRows(active_dim).noalias() =
             FP.block(0, ROTATION_INDEX, active_dim, 3) * rotation_transition.transpose()
             + FP.block(0, OMEGA_INDEX, active_dim, 3) * omega_transition.transpose();
@@ -390,23 +404,19 @@ public:
             + FP.block(0, ROTATION_INDEX, active_dim, 3) * velocity_rotation_transition.transpose()
             + FP.block(0, ACCELERATION_INDEX, active_dim, 3)
                 * velocity_acceleration_transition.transpose()
-            + dt * FP.block(0, GRAVITY_INDEX, active_dim, 3);
+            + dt_cov * FP.block(0, GRAVITY_INDEX, active_dim, 3);
 
         P_.topLeftCorner(active_dim, active_dim) = FP.topLeftCorner(active_dim, active_dim);
         P_.block(0, POSITION_INDEX, active_dim, 3) = position_columns.topRows(active_dim);
         P_.block(0, ROTATION_INDEX, active_dim, 3) = rotation_columns.topRows(active_dim);
         P_.block(0, VELOCITY_INDEX, active_dim, 3) = velocity_columns.topRows(active_dim);
 
-        const double dt_squared = dt * dt;
+        const double dt_squared = dt_cov * dt_cov;
         for (int i = 0; i < active_dim; ++i) {
             P_(i, i) += process_noise_diagonal_[i] * dt_squared;
         }
         symmetrize_active_covariance();
-
-        state_.pose.translation() += state_.vel * dt;
-        state_.vel += (R_odom_state * state_.acc + state_.gravity) * dt;
-        state_.pose.linear() = R_odom_state * utils::so3::exp_so3(rotation_increment);
-        state_.timestamp = timestamp;
+        cov_timestamp_ = timestamp;
     }
 
     void update_imu(const common::ImuMsg& imu, ImuState& imu_state, std::size_t imu_id) {
@@ -591,6 +601,7 @@ public:
     EstimationState state_;
     Covariance P_ = Covariance::Zero();
     ErrorState process_noise_diagonal_ = ErrorState::Zero();
+    double cov_timestamp_ = -1;
     std::shared_ptr<SmallIVox> ivox_;
     std::vector<Eigen::Vector3f> initial_points_;
     std::vector<Eigen::Vector3f> pending_initial_points_;

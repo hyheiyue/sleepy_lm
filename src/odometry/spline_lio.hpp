@@ -1,25 +1,19 @@
 #pragma once
+
 #include "ivox.hpp"
-#include "sensor/common.hpp"
 #include "sensor/imu.hpp"
 #include "sensor/point_cloud.hpp"
 #include "state.hpp"
 #include "utils/logger.hpp"
 #include "utils/rclcpp_parameter_node.hpp"
-#include "utils/so3.hpp"
 
-#include <Eigen/Cholesky>
 #include <Eigen/Core>
-#include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
 
-#include <Eigen/src/Geometry/Transform.h>
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <memory>
-#include <optional>
-#include <utility>
 #include <vector>
 
 namespace sleepy {
@@ -47,6 +41,21 @@ private:
             batch_interval = config.declare<double>("batch_interval");
         }
     };
+
+    struct MeasurementBatch {
+        double batch_start_timestamp = -1.0;
+        double batch_end_timestamp = -1.0;
+        std::vector<common::Point> point_batch;
+        std::vector<common::ImuMsg> imu_batch;
+
+        void reset() {
+            batch_start_timestamp = -1.0;
+            batch_end_timestamp = -1.0;
+            point_batch.clear();
+            imu_batch.clear();
+        }
+    };
+
     enum class InitStage { WaitingImu, BuildingMap, Finished };
 
 public:
@@ -57,6 +66,7 @@ public:
             static_cast<std::size_t>(params_.map_capacity)
         );
     }
+
     [[nodiscard]] const EstimationState& state() const noexcept {
         return state_;
     }
@@ -72,22 +82,47 @@ public:
             return;
         }
 
-        ensure_imu_count(sensors.size());
+        if (imu_states_.size() < sensors.size()) {
+            imu_states_.resize(sensors.size());
+        }
         const auto& sensor = sensors[imu.sensor.id];
         if (!sensor.frame_in_state) {
             return;
         }
-
         auto& imu_state = imu_states_[imu.sensor.id];
         imu_state.imu_in_state = sensor.frame_in_state.value() * sensor.sensor_in_frame;
         if (!imu_state.initialized && !state_initialized()) {
-            collect_initialization_sample(imu_state, imu);
-            if (all_imu_initialized()) {
+            if (!imu_state.has_first_sample) {
+                imu_state.first_timestamp = imu.timestamp;
+                imu_state.has_first_sample = true;
+            } else if (imu.timestamp < imu_state.last_timestamp) {
+                return;
+            }
+
+            imu_state.initialization_samples.push_back(ImuState::InitializationSample {
+                .timestamp = imu.timestamp,
+                .linear_acceleration = imu.linear_acceleration,
+                .angular_velocity = imu.angular_velocity,
+            });
+            imu_state.last_timestamp = imu.timestamp;
+
+            const bool enough_samples = imu_state.initialization_samples.size()
+                >= static_cast<std::size_t>(params_.initialization_min_samples);
+            const bool enough_time =
+                imu.timestamp - imu_state.first_timestamp >= params_.initialization_window;
+            if (enough_samples && enough_time) {
+                initialize_imu(imu_state);
+            }
+            if (!imu_states_.empty()
+                && std::all_of(imu_states_.begin(), imu_states_.end(), [](const ImuState& state) {
+                       return state.initialized;
+                   }))
+            {
                 initialize_state(imu.timestamp);
             }
             return;
         }
-        update_batch();
+        add_to_batch(imu, batch_.imu_batch);
     }
 
     void
@@ -102,14 +137,6 @@ public:
         if (!sensor.frame_in_state) {
             return;
         }
-        if (sensor_tf_cahce_.size() != sensors.size()) {
-            sensor_tf_cahce_.resize(sensors.size());
-        }
-        if (!sensor_tf_cahce_[point_in_lidar.sensor.id]) {
-            sensor_tf_cahce_[point_in_lidar.sensor.id] =
-                std::make_pair(sensor.frame_in_state.value(), sensor.sensor_in_frame);
-        }
-
         const Eigen::Isometry3d lidar_in_state =
             sensor.frame_in_state.value() * sensor.sensor_in_frame;
         const Eigen::Vector3d point_state = lidar_in_state * point_in_lidar.position.cast<double>();
@@ -124,60 +151,39 @@ public:
         }
 
         if (init_stage_ == InitStage::BuildingMap) {
-            initial_points_.push_back(transform_point_to_odom(point_state).cast<float>());
-            initialize_map();
+            initial_points_.push_back((state_.pose * point_state).cast<float>());
+            if (initial_points_.size() >= static_cast<std::size_t>(params_.initial_map_size)) {
+                for (const auto& point: initial_points_) {
+                    ivox_->add_point(point);
+                }
+                initial_points_.clear();
+                init_stage_ = InitStage::Finished;
+                utils::log_info("Spline-LIO map initialized");
+            }
             return;
         }
 
         if (init_stage_ != InitStage::Finished) {
             return;
         }
-        points_batch_.push_back(point_in_lidar);
-        if (points_batch_.front().timestamp - points_batch_.back().timestamp
-            >= params_.batch_interval) {
+        add_to_batch(point_in_lidar, batch_.point_batch);
+    }
+
+private:
+    template<typename Message>
+    void add_to_batch(const Message& message, std::vector<Message>& batch) {
+        batch.push_back(message);
+        if (batch_.batch_start_timestamp < 0.0) {
+            batch_.batch_start_timestamp = message.timestamp;
+        }
+        batch_.batch_end_timestamp = message.timestamp;
+        if (batch_.batch_end_timestamp - batch_.batch_start_timestamp >= params_.batch_interval) {
             update_batch();
         }
     }
+
     void update_batch() {
-        if (points_batch_.empty()) {
-            return;
-        }
-
-        points_batch_.clear();
-    };
-
-    std::vector<common::Point> points_batch_;
-    std::vector<std::optional<std::pair<Eigen::Isometry3d, Eigen::Isometry3d>>> sensor_tf_cahce_;
-
-private:
-    void ensure_imu_count(std::size_t count) {
-        if (imu_states_.size() < count) {
-            imu_states_.resize(count);
-        }
-    }
-
-    void collect_initialization_sample(ImuState& imu_state, const common::ImuMsg& imu) {
-        if (!imu_state.has_first_sample) {
-            imu_state.first_timestamp = imu.timestamp;
-            imu_state.has_first_sample = true;
-        } else if (imu.timestamp < imu_state.last_timestamp) {
-            return;
-        }
-
-        imu_state.initialization_samples.push_back(ImuState::InitializationSample {
-            .timestamp = imu.timestamp,
-            .linear_acceleration = imu.linear_acceleration,
-            .angular_velocity = imu.angular_velocity,
-        });
-        imu_state.last_timestamp = imu.timestamp;
-
-        const bool enough_samples = imu_state.initialization_samples.size()
-            >= static_cast<std::size_t>(params_.initialization_min_samples);
-        const bool enough_time =
-            imu.timestamp - imu_state.first_timestamp >= params_.initialization_window;
-        if (enough_samples && enough_time) {
-            initialize_imu(imu_state);
-        }
+        batch_.reset();
     }
 
     void initialize_imu(ImuState& imu_state) {
@@ -262,36 +268,11 @@ private:
 
         initial_points_.reserve(initial_points_.size() + pending_initial_points_.size());
         for (const auto& point: pending_initial_points_) {
-            initial_points_.push_back(transform_point_to_odom(point.cast<double>()).cast<float>());
+            initial_points_.push_back((state_.pose * point.cast<double>()).cast<float>());
         }
         pending_initial_points_.clear();
         init_stage_ = InitStage::BuildingMap;
         return true;
-    }
-
-    bool initialize_map() {
-        if (initial_points_.size() < static_cast<std::size_t>(params_.initial_map_size)) {
-            return false;
-        }
-        for (const auto& point: initial_points_) {
-            ivox_->add_point(point);
-        }
-        initial_points_.clear();
-        init_stage_ = InitStage::Finished;
-        utils::log_info("Spline-LIO map initialized");
-        return true;
-    }
-
-    [[nodiscard]] bool all_imu_initialized() const {
-        return !imu_states_.empty()
-            && std::all_of(imu_states_.begin(), imu_states_.end(), [](const ImuState& imu) {
-                   return imu.initialized;
-               });
-    }
-
-    [[nodiscard]] Eigen::Vector3d transform_point_to_odom(const Eigen::Vector3d& point_state
-    ) const {
-        return state_.pose * point_state;
     }
 
     Params params_;
@@ -300,6 +281,7 @@ private:
     EstimationState state_;
 
     std::shared_ptr<SmallIVox> ivox_;
+    MeasurementBatch batch_;
     std::vector<Eigen::Vector3f> initial_points_;
     std::vector<Eigen::Vector3f> pending_initial_points_;
     std::vector<Eigen::Vector3d> points_odom_cache_;

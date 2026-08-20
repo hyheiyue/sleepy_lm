@@ -161,23 +161,23 @@ struct SleepyLm::Impl {
                         }
                     }
                     TimedEvent event{
-                .type = TimedEvent::Type::Imu,
-                .sensor = sensor_tag,
-                .pointcloud = {},
-                .imu =
-                    {
-                        .timestamp = msg.header.stamp.sec +
-                                     msg.header.stamp.nanosec / 1e9,
-                        .linear_acceleration = Eigen::Vector3d(
-                            msg.linear_acceleration.x * acc_scale,
-                            msg.linear_acceleration.y * acc_scale,
-                            msg.linear_acceleration.z * acc_scale),
-                        .angular_velocity = Eigen::Vector3d(
-                            msg.angular_velocity.x, msg.angular_velocity.y,
-                            msg.angular_velocity.z),
+                        .type = TimedEvent::Type::Imu,
                         .sensor = sensor_tag,
-                    },
-            };
+                        .pointcloud = {},
+                        .imu =
+                            {
+                                .timestamp = msg.header.stamp.sec +
+                                            msg.header.stamp.nanosec / 1e9,
+                                .linear_acceleration = Eigen::Vector3d(
+                                    msg.linear_acceleration.x * acc_scale,
+                                    msg.linear_acceleration.y * acc_scale,
+                                    msg.linear_acceleration.z * acc_scale),
+                                .angular_velocity = Eigen::Vector3d(
+                                    msg.angular_velocity.x, msg.angular_velocity.y,
+                                    msg.angular_velocity.z),
+                                .sensor = sensor_tag,
+                            },
+                    };
                     if (event_queue_.push(std::move(event))) {
                         utils::log_warn(
                             "sleep_lio dropped oldest queued imu event from sensor {}",
