@@ -181,7 +181,7 @@ public:
         }
 
         if (init_stage_ == InitStage::BuildingMap) {
-            initial_points_.push_back((state_.pose * point_state).cast<float>());
+            initial_points_.push_back((state_.state_in_odom * point_state).cast<float>());
             if (initial_points_.size() >= static_cast<std::size_t>(params_.initial_map_size)) {
                 for (const auto& point: initial_points_) {
                     ivox_->add_point(point);
@@ -279,26 +279,26 @@ private:
         gravity_state *= params_.gravity_norm;
 
         state_.timestamp = timestamp;
-        state_.pose.setIdentity();
-        state_.vel.setZero();
+        state_.state_in_odom.setIdentity();
+        state_.velocity_odom.setZero();
         state_.omg.setZero();
         if (params_.align_gravity_with_z_axis) {
             const Eigen::Vector3d gravity_odom = -params_.gravity_norm * Eigen::Vector3d::UnitZ();
-            state_.pose.linear() = Eigen::Quaterniond::FromTwoVectors(
+            state_.state_in_odom.linear() = Eigen::Quaterniond::FromTwoVectors(
                                        gravity_state.normalized(),
                                        gravity_odom.normalized()
             )
                                        .normalized()
                                        .toRotationMatrix();
-            state_.gravity = gravity_odom;
+            state_.gravity_odom = gravity_odom;
         } else {
-            state_.gravity = gravity_state;
+            state_.gravity_odom = gravity_state;
         }
-        state_.acc = -state_.pose.linear().transpose() * state_.gravity;
+        state_.acc = -state_.state_in_odom.linear().transpose() * state_.gravity_odom;
 
         initial_points_.reserve(initial_points_.size() + pending_initial_points_.size());
         for (const auto& point: pending_initial_points_) {
-            initial_points_.push_back((state_.pose * point.cast<double>()).cast<float>());
+            initial_points_.push_back((state_.state_in_odom * point.cast<double>()).cast<float>());
         }
         pending_initial_points_.clear();
         init_stage_ = InitStage::BuildingMap;

@@ -373,20 +373,20 @@ struct SleepyLm::Impl {
         last_published_timestamp = state.timestamp;
 
         const rclcpp::Time stamp(static_cast<std::int64_t>(state.timestamp * 1e9));
-        const Eigen::Quaterniond orientation(state.pose.linear());
+        const Eigen::Quaterniond orientation(state.state_in_odom.linear());
         nav_msgs::msg::Odometry odometry;
         odometry.header.stamp = stamp;
         odometry.header.frame_id = params_.odom_frame;
         odometry.child_frame_id = params_.state_frame;
-        odometry.pose.pose.position.x = state.pose.translation().x();
-        odometry.pose.pose.position.y = state.pose.translation().y();
-        odometry.pose.pose.position.z = state.pose.translation().z();
+        odometry.pose.pose.position.x = state.state_in_odom.translation().x();
+        odometry.pose.pose.position.y = state.state_in_odom.translation().y();
+        odometry.pose.pose.position.z = state.state_in_odom.translation().z();
         odometry.pose.pose.orientation.x = orientation.x();
         odometry.pose.pose.orientation.y = orientation.y();
         odometry.pose.pose.orientation.z = orientation.z();
         odometry.pose.pose.orientation.w = orientation.w();
 
-        const Eigen::Vector3d velocity_state = state.pose.linear().transpose() * state.vel;
+        const Eigen::Vector3d velocity_state = state.state_in_odom.linear().transpose() * state.velocity_odom;
         odometry.twist.twist.linear.x = velocity_state.x();
         odometry.twist.twist.linear.y = velocity_state.y();
         odometry.twist.twist.linear.z = velocity_state.z();
@@ -405,7 +405,7 @@ struct SleepyLm::Impl {
             odom_path_.poses.erase(odom_path_.poses.begin());
         }
         odom_path_pub_->publish(odom_path_);
-        tf_->publish_transform(state.pose, params_.odom_frame, params_.state_frame, stamp);
+        tf_->publish_transform(state.state_in_odom, params_.odom_frame, params_.state_frame, stamp);
     }
     void publish_pointcloud(const std::vector<Eigen::Vector3d>& points) {
         if (points.empty()) {
@@ -452,7 +452,7 @@ struct SleepyLm::Impl {
             *iter_x = static_cast<float>(point.x());
             *iter_y = static_cast<float>(point.y());
             *iter_z = static_cast<float>(point.z());
-            *iter_i = (point - state.pose.translation()).norm();
+            *iter_i = (point - state.state_in_odom.translation()).norm();
             ++iter_x;
             ++iter_y;
             ++iter_z;

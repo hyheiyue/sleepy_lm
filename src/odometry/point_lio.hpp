@@ -231,7 +231,7 @@ public:
         predict_state(point_in_lidar.timestamp);
 
         if (init_stage_ == InitStage::BuildingMap) {
-            initial_points_.push_back((state_.pose * point_state).cast<float>());
+            initial_points_.push_back((state_.state_in_odom * point_state).cast<float>());
             if (initial_points_.size() >= static_cast<std::size_t>(params_.initial_map_size)) {
                 for (const auto& point: initial_points_) {
                     ivox_->add_point(point);
@@ -248,7 +248,7 @@ public:
         }
 
         update_point(point_in_lidar.position, point_state);
-        const auto point_odom = state_.pose * point_state;
+        const auto point_odom = state_.state_in_odom * point_state;
         ivox_->add_point(point_odom.cast<float>());
         points_odom_cache_.push_back(point_odom);
     }
@@ -317,26 +317,25 @@ public:
 
         state_.timestamp = timestamp;
         cov_timestamp_ = timestamp;
-        state_.pose.setIdentity();
-        state_.vel.setZero();
+        state_.state_in_odom.setIdentity();
+        state_.velocity_odom.setZero();
         state_.omg.setZero();
         if (params_.align_gravity_with_z_axis) {
             const Eigen::Vector3d gravity_odom = -params_.gravity_norm * Eigen::Vector3d::UnitZ();
-            state_.pose.linear() = Eigen::Quaterniond::FromTwoVectors(
+            state_.state_in_odom.linear() = Eigen::Quaterniond::FromTwoVectors(
                                        gravity_state.normalized(),
                                        gravity_odom.normalized()
             )
                                        .normalized()
                                        .toRotationMatrix();
-            state_.gravity = gravity_odom;
+            state_.gravity_odom = gravity_odom;
         } else {
-            state_.gravity = gravity_state;
+            state_.gravity_odom = gravity_state;
         }
-        state_.acc = -state_.pose.linear().transpose() * state_.gravity;
-        project_gravity_covariance();
+        state_.acc = -state_.state_in_odom.linear().transpose() * state_.gravity_odom;
 
         for (const auto& point: pending_initial_points_) {
-            initial_points_.push_back((state_.pose * point.cast<double>()).cast<float>());
+            initial_points_.push_back((state_.state_in_odom * point.cast<double>()).cast<float>());
         }
         pending_initial_points_.clear();
 
@@ -355,12 +354,13 @@ public:
             return;
         }
 
-        const Eigen::Matrix3d R_odom_state = state_.pose.linear();
+        const Eigen::Matrix3d R_odom_state = state_.state_in_odom.linear();
         const Eigen::Vector3d rotation_increment = state_.omg * dt;
 
-        state_.pose.translation() += state_.vel * dt;
-        state_.vel += (R_odom_state * state_.acc + state_.gravity) * dt;
-        state_.pose.linear() = R_odom_state * utils::so3::exp_so3(rotation_increment);
+        state_.state_in_odom.translation() += state_.velocity_odom * dt;
+        state_.state_in_odom.linear() = R_odom_state * utils::so3::exp_so3(rotation_increment);
+        state_.velocity_odom +=
+            (state_.state_in_odom.linear() * state_.acc + state_.gravity_odom) * dt;
         state_.timestamp = timestamp;
     }
     void predict_cov(double timestamp) {
@@ -369,7 +369,7 @@ public:
             return;
         }
         const int active_dim = active_error_state_dim();
-        const Eigen::Matrix3d R_odom_state = state_.pose.linear();
+        const Eigen::Matrix3d R_odom_state = state_.state_in_odom.linear();
         const Eigen::Vector3d rotation_increment = state_.omg * dt_cov;
         const Eigen::Matrix3d rotation_transition = utils::so3::exp_so3(-rotation_increment);
         const Eigen::Matrix3d omega_transition = utils::so3::a_matrix(-rotation_increment) * dt_cov;
@@ -377,8 +377,9 @@ public:
             -R_odom_state * utils::so3::hat(state_.acc) * dt_cov;
         const Eigen::Matrix3d velocity_acceleration_transition = R_odom_state * dt_cov;
 
-        // F differs from identity only in the position, rotation and velocity
-        // block rows. Form FP and then the corresponding columns of FPF^T.
+        // The error-state transition follows the mixed-frame ESKF convention:
+        // attitude and specific force errors are state-frame quantities, while
+        // position, velocity and gravity errors are odom-frame quantities.
         Covariance FP;
         FP.topLeftCorner(active_dim, active_dim) = P_.topLeftCorner(active_dim, active_dim);
         FP.block(POSITION_INDEX, 0, 3, active_dim) = P_.block(POSITION_INDEX, 0, 3, active_dim)
@@ -423,21 +424,29 @@ public:
         const Eigen::Matrix3d R_state_imu = imu_state.imu_in_state.linear();
         const Eigen::Matrix3d R_imu_state = R_state_imu.transpose();
         const Eigen::Vector3d r_state_imu = imu_state.imu_in_state.translation();
-        const Eigen::Vector3d measured_omega_state =
+        const Eigen::Vector3d measured_angular_velocity_state =
             R_state_imu * (imu.angular_velocity - imu_state.bg);
 
-        Eigen::Vector3d alpha_state = Eigen::Vector3d::Zero();
+        Eigen::Vector3d angular_acceleration_state = Eigen::Vector3d::Zero();
         const double motion_dt = imu.timestamp - imu_state.last_motion_timestamp;
         if (imu_state.has_last_motion && motion_dt > 0.0) {
-            alpha_state = (measured_omega_state - imu_state.last_omega_state) / motion_dt;
+            angular_acceleration_state =
+                (measured_angular_velocity_state - imu_state.last_omega_state)
+                / motion_dt;
         }
 
-        const Eigen::Vector3d lever =
-            alpha_state.cross(r_state_imu) + state_.omg.cross(state_.omg.cross(r_state_imu));
+        const Eigen::Vector3d lever_acceleration_state =
+            angular_acceleration_state.cross(r_state_imu)
+            + state_.omg.cross(
+                state_.omg.cross(r_state_imu)
+            );
         Eigen::Matrix<double, 6, 1> residual;
-        residual.head<3>() = imu.angular_velocity - (R_imu_state * state_.omg + imu_state.bg);
+        residual.head<3>() = imu.angular_velocity
+            - (R_imu_state * state_.omg + imu_state.bg);
         residual.tail<3>() =
-            imu.linear_acceleration - (R_imu_state * (state_.acc + lever) + imu_state.ba);
+            imu.linear_acceleration
+            - (R_imu_state * (state_.acc + lever_acceleration_state)
+               + imu_state.ba);
 
         // Active columns are [omega, acceleration, bg_i, ba_i]. Keeping this
         // compact avoids multiplying the six-row model by all inactive IMU blocks.
@@ -446,7 +455,8 @@ public:
         H.block<3, 3>(0, 6).setIdentity();
         const Eigen::Matrix3d centripetal_jacobian =
             state_.omg.dot(r_state_imu) * Eigen::Matrix3d::Identity()
-            + state_.omg * r_state_imu.transpose() - 2.0 * r_state_imu * state_.omg.transpose();
+            + state_.omg * r_state_imu.transpose()
+            - 2.0 * r_state_imu * state_.omg.transpose();
         H.block<3, 3>(3, 0) = R_imu_state * centripetal_jacobian;
         H.block<3, 3>(3, 3) = R_imu_state;
         H.block<3, 3>(3, 9).setIdentity();
@@ -469,7 +479,8 @@ public:
 
         const int active_dim = active_error_state_dim();
         Eigen::Matrix<double, MAX_ERROR_STATE_DIM, 12> selected_columns;
-        selected_columns.block(0, 0, active_dim, 3) = P_.block(0, OMEGA_INDEX, active_dim, 3);
+        selected_columns.block(0, 0, active_dim, 3) =
+            P_.block(0, OMEGA_INDEX, active_dim, 3);
         selected_columns.block(0, 3, active_dim, 3) =
             P_.block(0, ACCELERATION_INDEX, active_dim, 3);
         selected_columns.block(0, 6, active_dim, 3) =
@@ -478,7 +489,8 @@ public:
             P_.block(0, imu_error_index(imu_id, 3), active_dim, 3);
 
         Eigen::Matrix<double, 12, 12> selected_covariance;
-        selected_covariance.block<3, 12>(0, 0) = selected_columns.block<3, 12>(OMEGA_INDEX, 0);
+        selected_covariance.block<3, 12>(0, 0) =
+            selected_columns.block<3, 12>(OMEGA_INDEX, 0);
         selected_covariance.block<3, 12>(3, 0) =
             selected_columns.block<3, 12>(ACCELERATION_INDEX, 0);
         selected_covariance.block<3, 12>(6, 0) =
@@ -503,15 +515,14 @@ public:
             P_.topLeftCorner(active_dim, active_dim).noalias() -= gain.topRows(active_dim)
                 * innovation_covariance * gain.topRows(active_dim).transpose();
             symmetrize_active_covariance();
-            project_gravity_covariance();
         }
-        imu_state.last_omega_state = R_state_imu * (imu.angular_velocity - imu_state.bg);
+        imu_state.last_omega_state = measured_angular_velocity_state;
         imu_state.last_motion_timestamp = imu.timestamp;
         imu_state.has_last_motion = true;
     }
 
     bool update_point(const Eigen::Vector3f& point_lidar, const Eigen::Vector3d& point_state) {
-        const Eigen::Vector3f point_odom = (state_.pose * point_state).cast<float>();
+        const Eigen::Vector3f point_odom = (state_.state_in_odom * point_state).cast<float>();
         nearest_points_.clear();
         ivox_->get_closest_point(point_odom, nearest_points_, NUM_MATCH_POINTS);
         if (nearest_points_.size() != NUM_MATCH_POINTS) {
@@ -550,7 +561,7 @@ public:
         }
 
         const Eigen::Vector3d normal_odom = normal.cast<double>();
-        const Eigen::Vector3d normal_state = state_.pose.linear().transpose() * normal_odom;
+        const Eigen::Vector3d normal_state = state_.state_in_odom.linear().transpose() * normal_odom;
         Eigen::Matrix<double, 1, 6> H;
         H << normal_odom.transpose(), point_state.cross(normal_state).transpose();
 
@@ -567,7 +578,6 @@ public:
         P_.topLeftCorner(active_dim, active_dim).noalias() -=
             PHT.head(active_dim) * PHT.head(active_dim).transpose() / innovation_covariance;
         symmetrize_active_covariance();
-        project_gravity_covariance();
         return true;
     }
 
@@ -582,57 +592,15 @@ public:
         }
     }
 
-    // Gravity is represented by a 3D error block for compatibility with the
-    // existing covariance layout, but its physical state lives on S2: only
-    // two tangent directions are observable and its magnitude is fixed.
-    void project_gravity_covariance() {
-        const int active_dim = active_error_state_dim();
-        const double gravity_squared_norm = state_.gravity.squaredNorm();
-        if (gravity_squared_norm <= 1e-12 || !std::isfinite(gravity_squared_norm)) {
-            return;
-        }
 
-        const Eigen::Vector3d gravity_unit = state_.gravity / std::sqrt(gravity_squared_norm);
-        const Eigen::Matrix3d tangent_projector =
-            Eigen::Matrix3d::Identity() - gravity_unit * gravity_unit.transpose();
-
-        // Project both covariance block directions. This preserves all
-        // cross-covariances while removing the unobservable radial gravity
-        // component introduced by an additive Kalman update.
-        const auto projected_rows =
-            (tangent_projector * P_.block(GRAVITY_INDEX, 0, 3, active_dim)).eval();
-        const auto projected_columns =
-            (P_.block(0, GRAVITY_INDEX, active_dim, 3) * tangent_projector).eval();
-        P_.block(GRAVITY_INDEX, 0, 3, active_dim) = projected_rows;
-        P_.block(0, GRAVITY_INDEX, active_dim, 3) = projected_columns;
-        symmetrize_active_covariance();
-    }
-
-    void apply_gravity_error(const Eigen::Vector3d& gravity_error) {
-        const double gravity_norm = params_.gravity_norm;
-
-        const double current_norm = state_.gravity.norm();
-        if (current_norm <= 1e-12 || !std::isfinite(current_norm)) {
-            state_.gravity = -gravity_norm * Eigen::Vector3d::UnitZ();
-        }
-
-        const Eigen::Vector3d gravity_unit = state_.gravity.normalized();
-        const Eigen::Vector3d tangent_error =
-            gravity_error - gravity_unit * gravity_unit.dot(gravity_error);
-        const Eigen::Vector3d corrected_gravity = state_.gravity + tangent_error;
-
-        state_.gravity = gravity_norm * corrected_gravity.normalized();
-    }
 
     void apply_error_state(const ErrorState& correction) {
-        state_.pose.translation() += correction.segment<3>(POSITION_INDEX);
-        state_.pose.linear() *= utils::so3::exp_so3(correction.segment<3>(ROTATION_INDEX));
-        state_.pose.linear() =
-            Eigen::Quaterniond(state_.pose.linear()).normalized().toRotationMatrix();
-        state_.vel += correction.segment<3>(VELOCITY_INDEX);
+        state_.state_in_odom.translation() += correction.segment<3>(POSITION_INDEX);
+        state_.state_in_odom.linear() *= utils::so3::exp_so3(correction.segment<3>(ROTATION_INDEX));
+        state_.velocity_odom += correction.segment<3>(VELOCITY_INDEX);
         state_.omg += correction.segment<3>(OMEGA_INDEX);
         state_.acc += correction.segment<3>(ACCELERATION_INDEX);
-        apply_gravity_error(correction.segment<3>(GRAVITY_INDEX));
+        state_.gravity_odom += correction.segment<3>(GRAVITY_INDEX);
         for (std::size_t i = 0; i < imu_states_.size(); ++i) {
             imu_states_[i].bg += correction.segment<3>(imu_error_index(i));
             imu_states_[i].ba += correction.segment<3>(imu_error_index(i, 3));
