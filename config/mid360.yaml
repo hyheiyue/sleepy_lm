@@ -9,9 +9,9 @@ sleepy_lm_node:
     sensor:
       pointcloud_sensors: ["pc1"]
       pc1:
-        topic: /robot1/livox/lidar
-        # type: LIVOX_POINTCLOUD2
-        type: LIVOX_CUSTOM_MSG
+        topic: /livox/lidar
+        type: LIVOX_POINTCLOUD2
+        # type: LIVOX_CUSTOM_MSG
         frame_id: livox_frame
         sensor_in_frame_t: [-0.011, -0.02329, 0.04412]
         sensor_in_frame_R: [1.0, 0.0, 0.0,
@@ -19,7 +19,7 @@ sleepy_lm_node:
                             0.0, 0.0, 1.0]
       imu_sensors: ["imu1"]
       imu1:
-        topic: /robot1/livox/imu
+        topic: /livox/imu
         frame_id: livox_frame
         acc_scale: 9.80665
         sensor_in_frame_t: [0.0, 0.0, 0.0]

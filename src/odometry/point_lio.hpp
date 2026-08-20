@@ -41,6 +41,13 @@ private:
 
     using Covariance = Eigen::Matrix<double, MAX_ERROR_STATE_DIM, MAX_ERROR_STATE_DIM>;
     using ErrorState = Eigen::Matrix<double, MAX_ERROR_STATE_DIM, 1>;
+    static int imu_error_index(std::size_t imu_id, int offset = 0) {
+        return BASE_STATE_DIM + static_cast<int>(IMU_ERROR_DIM * imu_id) + offset;
+    }
+
+    [[nodiscard]] int active_error_state_dim() const {
+        return BASE_STATE_DIM + static_cast<int>(IMU_ERROR_DIM * imu_states_.size());
+    }
 
     struct Params {
         double gravity_norm = 9.80665;
@@ -246,14 +253,6 @@ public:
         points_odom_cache_.push_back(point_odom);
     }
 
-    static int imu_error_index(std::size_t imu_id, int offset = 0) {
-        return BASE_STATE_DIM + static_cast<int>(IMU_ERROR_DIM * imu_id) + offset;
-    }
-
-    [[nodiscard]] int active_error_state_dim() const {
-        return BASE_STATE_DIM + static_cast<int>(IMU_ERROR_DIM * imu_states_.size());
-    }
-
     void initialize_imu(ImuState& imu_state) {
         if (imu_state.initialization_samples.empty()) {
             return;
@@ -334,6 +333,7 @@ public:
             state_.gravity = gravity_state;
         }
         state_.acc = -state_.pose.linear().transpose() * state_.gravity;
+        project_gravity_covariance();
 
         for (const auto& point: pending_initial_points_) {
             initial_points_.push_back((state_.pose * point.cast<double>()).cast<float>());
@@ -503,6 +503,7 @@ public:
             P_.topLeftCorner(active_dim, active_dim).noalias() -= gain.topRows(active_dim)
                 * innovation_covariance * gain.topRows(active_dim).transpose();
             symmetrize_active_covariance();
+            project_gravity_covariance();
         }
         imu_state.last_omega_state = R_state_imu * (imu.angular_velocity - imu_state.bg);
         imu_state.last_motion_timestamp = imu.timestamp;
@@ -566,6 +567,7 @@ public:
         P_.topLeftCorner(active_dim, active_dim).noalias() -=
             PHT.head(active_dim) * PHT.head(active_dim).transpose() / innovation_covariance;
         symmetrize_active_covariance();
+        project_gravity_covariance();
         return true;
     }
 
@@ -580,6 +582,48 @@ public:
         }
     }
 
+    // Gravity is represented by a 3D error block for compatibility with the
+    // existing covariance layout, but its physical state lives on S2: only
+    // two tangent directions are observable and its magnitude is fixed.
+    void project_gravity_covariance() {
+        const int active_dim = active_error_state_dim();
+        const double gravity_squared_norm = state_.gravity.squaredNorm();
+        if (gravity_squared_norm <= 1e-12 || !std::isfinite(gravity_squared_norm)) {
+            return;
+        }
+
+        const Eigen::Vector3d gravity_unit = state_.gravity / std::sqrt(gravity_squared_norm);
+        const Eigen::Matrix3d tangent_projector =
+            Eigen::Matrix3d::Identity() - gravity_unit * gravity_unit.transpose();
+
+        // Project both covariance block directions. This preserves all
+        // cross-covariances while removing the unobservable radial gravity
+        // component introduced by an additive Kalman update.
+        const auto projected_rows =
+            (tangent_projector * P_.block(GRAVITY_INDEX, 0, 3, active_dim)).eval();
+        const auto projected_columns =
+            (P_.block(0, GRAVITY_INDEX, active_dim, 3) * tangent_projector).eval();
+        P_.block(GRAVITY_INDEX, 0, 3, active_dim) = projected_rows;
+        P_.block(0, GRAVITY_INDEX, active_dim, 3) = projected_columns;
+        symmetrize_active_covariance();
+    }
+
+    void apply_gravity_error(const Eigen::Vector3d& gravity_error) {
+        const double gravity_norm = params_.gravity_norm;
+
+        const double current_norm = state_.gravity.norm();
+        if (current_norm <= 1e-12 || !std::isfinite(current_norm)) {
+            state_.gravity = -gravity_norm * Eigen::Vector3d::UnitZ();
+        }
+
+        const Eigen::Vector3d gravity_unit = state_.gravity.normalized();
+        const Eigen::Vector3d tangent_error =
+            gravity_error - gravity_unit * gravity_unit.dot(gravity_error);
+        const Eigen::Vector3d corrected_gravity = state_.gravity + tangent_error;
+
+        state_.gravity = gravity_norm * corrected_gravity.normalized();
+    }
+
     void apply_error_state(const ErrorState& correction) {
         state_.pose.translation() += correction.segment<3>(POSITION_INDEX);
         state_.pose.linear() *= utils::so3::exp_so3(correction.segment<3>(ROTATION_INDEX));
@@ -588,7 +632,7 @@ public:
         state_.vel += correction.segment<3>(VELOCITY_INDEX);
         state_.omg += correction.segment<3>(OMEGA_INDEX);
         state_.acc += correction.segment<3>(ACCELERATION_INDEX);
-        state_.gravity += correction.segment<3>(GRAVITY_INDEX);
+        apply_gravity_error(correction.segment<3>(GRAVITY_INDEX));
         for (std::size_t i = 0; i < imu_states_.size(); ++i) {
             imu_states_[i].bg += correction.segment<3>(imu_error_index(i));
             imu_states_[i].ba += correction.segment<3>(imu_error_index(i, 3));

@@ -20,6 +20,36 @@ namespace sleepy {
 
 class SplineLio {
 private:
+    static constexpr int SPLINE_CP_DIM = 6;
+    static constexpr int SPLINE_CP_NUM = 4;
+    static constexpr int POSITION_OFFSET = 0;
+    static constexpr int ROTATION_OFFSET = 3;
+    // 4 个控制点：4 * 6 = 24 维，索引范围 [0, 24)
+    static constexpr int SPLINE_STATE_DIM = SPLINE_CP_DIM * SPLINE_CP_NUM;
+
+    // 重力从第 24 维开始，占用 [24, 27)
+    static constexpr int GRAVITY_INDEX = SPLINE_STATE_DIM;
+    static constexpr int BASE_STATE_DIM = SPLINE_STATE_DIM + 3;
+
+    static constexpr int IMU_ERROR_DIM = 6;
+    static constexpr std::size_t MAX_IMUS = 4;
+    static constexpr int MAX_ERROR_STATE_DIM =
+        BASE_STATE_DIM + static_cast<int>(IMU_ERROR_DIM * MAX_IMUS);
+
+    using Covariance = Eigen::Matrix<double, MAX_ERROR_STATE_DIM, MAX_ERROR_STATE_DIM>;
+    using ErrorState = Eigen::Matrix<double, MAX_ERROR_STATE_DIM, 1>;
+    static int spline_cp_error_index(std::size_t cp_id, int offset = 0) {
+        return static_cast<int>(cp_id) * SPLINE_CP_DIM + offset;
+    }
+    static int imu_error_index(std::size_t imu_id, int offset = 0) {
+        return BASE_STATE_DIM + static_cast<int>(IMU_ERROR_DIM * imu_id) + offset;
+    }
+    static constexpr int BA_OFFSET = 0;
+    static constexpr int BG_OFFSET = 3;
+
+    [[nodiscard]] int active_error_state_dim() const {
+        return BASE_STATE_DIM + static_cast<int>(IMU_ERROR_DIM * imu_states_.size());
+    }
     struct Params {
         double gravity_norm = 9.80665;
         bool align_gravity_with_z_axis = true;
@@ -279,7 +309,7 @@ private:
     InitStage init_stage_ = InitStage::WaitingImu;
     std::vector<ImuState> imu_states_;
     EstimationState state_;
-
+    Covariance P_ = Covariance::Zero();
     std::shared_ptr<SmallIVox> ivox_;
     MeasurementBatch batch_;
     std::vector<Eigen::Vector3f> initial_points_;
